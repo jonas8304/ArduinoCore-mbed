@@ -48,9 +48,9 @@ void setup() {
   NDP.onMatch(ledBlueOn);
   NDP.onEvent(ledGreenOn);
   Serial.println("Loading synpackages");
-  NDP.begin("mcu_fw_120_v91.synpkg");
-  NDP.load("dsp_firmware_v91.synpkg");
-  NDP.load("alexa_334_NDP120_B0_v11_v91.synpkg");
+  NDP.begin("mcu_fw_120.synpkg");
+  NDP.load("dsp_firmware.synpkg");
+  NDP.load("alexa_model334_ndp120.synpkg");
   Serial.println("packages loaded");
   NDP.getInfo();
   Serial.println("Configure clock");

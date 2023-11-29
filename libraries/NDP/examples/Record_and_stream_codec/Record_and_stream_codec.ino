@@ -4,12 +4,15 @@
   Prerequisite libraries:
     https://github.com/pschatzmann/arduino-libg722
     https://github.com/pschatzmann/arduino-audio-tools/
+    v0.9.3(older version) is required
 
   Precedure to extract audio:
   Setup the serial port as raw, for example with
      stty -F /dev/ttyACM0 115200 raw
   Dump the data
      cat /dev/ttyACM0 > test.g722
+  If issues extracting (2 steps above) try:
+     stty -f /dev/cu.usbmodem* speed 115200 | cat /dev/cu.usbmodem* >test.g722
   Open Audacity
      audacity test.g722
 */
@@ -25,6 +28,7 @@
 G722Encoder encoder;
 
 uint8_t data[2048];
+int n;
 
 void ledGreenOn() {
   nicla::leds.begin();
@@ -52,19 +56,27 @@ void setup() {
 
   encoder.setOutputStream(Serial);
 
-  NDP.begin("mcu_fw_120_v91.synpkg");
-  NDP.load("dsp_firmware_v91.synpkg");
-  NDP.load("alexa_334_NDP120_B0_v11_v91.synpkg");
+  Serial.println("Loading synpackages");
+  NDP.begin("mcu_fw_120.synpkg");
+  NDP.load("dsp_firmware.synpkg");
+  NDP.load("alexa_model334_ndp120.synpkg");
+  Serial.println("packages loaded");
   NDP.turnOnMicrophone();
-  int chunk_size = NDP.getAudioChunkSize();
-  if (chunk_size >= sizeof(data)) {
-    for(;;);
-  }
+  NDP.extractStart();
 }
 
 void loop() {
   unsigned int len = 0;
+  int s;
 
-  NDP.extractData(data, &len);
-  encoder.write(data, len);
+  NDP.waitForAudio();
+  for(;;) {
+    s = NDP.extractData(data, &len);
+    if (s) {
+      break;
+    }
+    if (len) {
+      encoder.write(data, len);
+    }
+  }
 }

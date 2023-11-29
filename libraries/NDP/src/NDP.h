@@ -101,8 +101,9 @@ public:
    int poll(void);
 
    // Extract data from the holding tank.
+   int extractStart(void);
    int extractData(uint8_t *data, unsigned int *len);
-
+   int waitForAudio(void);
 
    // passed to uilib, used for all SPI transfers such as in loadLog and poll
    static int spiTransfer(void *d, int mcu, uint32_t address, void *_out,
@@ -149,6 +150,7 @@ private:
    void interrupt_handler();
    int enable_interrupts(bool on);
    int checkMB();
+   int configureClockandCheckSystem();
 
    bool _initialized = false;
    bool _int_pin_enabled = false;

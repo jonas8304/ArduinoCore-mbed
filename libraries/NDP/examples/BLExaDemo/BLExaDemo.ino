@@ -11,9 +11,9 @@ const bool lowestPower = true;
 
 void alertViaBLE(int index) {
   // notify that we recognized a keyword
+
   alertLevel.writeValue(2);
-  delay(1000);
-  alertLevel.writeValue(0);
+  ledGreenOn();
 }
 
 void ledGreenOn() {
@@ -38,6 +38,8 @@ void ledRedBlink() {
 void setup() {
 
   Serial.begin(115200);
+  while(!Serial);
+
   nicla::begin();
   nicla::disableLDO();
   nicla::leds.begin();
@@ -56,9 +58,9 @@ void setup() {
   NDP.onError(ledRedBlink);
   NDP.onMatch(alertViaBLE);
   NDP.onEvent(ledGreenOn);
-  NDP.begin("mcu_fw_120_v91.synpkg");
-  NDP.load("dsp_firmware_v91.synpkg");
-  NDP.load("alexa_334_NDP120_B0_v11_v91.synpkg");
+  NDP.begin("mcu_fw_120.synpkg");
+  NDP.load("dsp_firmware.synpkg");
+  NDP.load("alexa_model334_ndp120.synpkg");
   NDP.turnOnMicrophone();
   NDP.interrupts();
 

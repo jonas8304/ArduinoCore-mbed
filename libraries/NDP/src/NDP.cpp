@@ -2,6 +2,7 @@
 #include "NDP.h"
 #include "mbed_events.h"
 #include "mbed_shared_queues.h"
+#include "../../syntiant_ilib/src/syntiant_ndp_ilib_version.h"
 
 #define NDP_SPICTL  0x4000903c
 // register for data transmission
@@ -30,31 +31,12 @@ int NDPClass::pdm_clk_init = 0;
 static struct syntiant_ndp120_tiny_device_s _ndp;
 static struct syntiant_ndp120_tiny_device_s *ndp = &_ndp;
 
-struct ndp120_fll_preset_s {
-  const char *name;
-  int operating_voltage;
-  uint32_t input_freq;
-  uint32_t output_freq;
-  uint32_t pdm_freq;
-};
-
-enum {
-  PLL_PRESET_OP_VOLTAGE_0p9 = 0,
-  PLL_PRESET_OP_VOLTAGE_1p0,
-  PLL_PRESET_OP_VOLTAGE_1p1
-};
-
-/* Define the table of FLL settings */
-static struct ndp120_fll_preset_s ndp120_fll_presets[] = {
-    {"mode_fll_0p9v_15p360MHz_32p768kHz", PLL_PRESET_OP_VOLTAGE_0p9, 32768, 15360000, 768000},
-    {"mode_fll_0p9v_16p896MHz_32p768kHz", PLL_PRESET_OP_VOLTAGE_0p9, 32768, 16896000, 768000},
-    { NULL, 0, 0, 0, 0}
-};
-
 static char fwver[NDP120_MCU_FW_VER_MAX_LEN] = "";
 static char dspfwver[NDP120_MCU_DSP_FW_VER_MAX_LEN] = "";
 static char pkgver[NDP120_MCU_PKG_VER_MAX_LEN] = "";
 static uint8_t pbiver[NDP120_MCU_PBI_VER_MAX_LEN] = "";
+static unsigned int scale_factor_per_nn[SYNTIANT_NDP120_MAX_CLASSES];
+static unsigned int sensor_info_per_sensor[SYNTIANT_NDP120_SENSOR_MAX];
 
 #define SYNTIANT_NDP120_ERROR_NAMES                                            \
     {                                                                          \
@@ -73,6 +55,13 @@ const char *syntiant_ndp_error_names[] = SYNTIANT_NDP120_ERROR_NAMES;
     if (do_exit) { return 0; } \
   } \
 } while (0); \
+
+static char *syntiant_ndp_sensor_id_names[] = SYNTIANT_NDP_SENSOR_ID_NAMES;
+const char
+*syntiant_ndp_sensor_id_name(int id)
+{
+    return SYNTIANT_NDP_SENSOR_ID_NAME(id);
+}
 
 static rtos::Mutex mtx;
 
@@ -216,21 +205,6 @@ int NDPClass::get_type(void *d, unsigned int *type)
 
 static mbed::InterruptIn irq(NDPClass::NDP_INT, PullDown);
 
-int NDPClass::getAudioChunkSize(void) {
-  int s;
-  uint32_t audio_chunk_size;
-  s = syntiant_ndp120_tiny_get_audio_chunk_size(ndp, &audio_chunk_size);
-  if (s) {
-    return 0;
-  }
-
-  audio_sample_chunk_size = (unsigned int)
-    (audio_chunk_size * SYNTIANT_NDP120_TINY_AUDIO_SAMPLE_RATE * SYNTIANT_NDP120_TINY_AUDIO_SAMPLES_PER_WORD / 1000000)
-    + sizeof(struct syntiant_ndp120_tiny_dsp_audio_sample_annotation_t);
-  return audio_sample_chunk_size;
-}
-
-
 int NDPClass::sendData(uint8_t *data, unsigned int len) 
 {
   int s = syntiant_ndp120_tiny_send_data(ndp, data,
@@ -239,22 +213,37 @@ int NDPClass::sendData(uint8_t *data, unsigned int len)
   return s;
 }
 
-
+int NDPClass::extractStart(void) {
+  uint32_t sample_size;
+  int s = syntiant_ndp120_tiny_get_recording_metadata(ndp,
+      &sample_size, SYNTIANT_NDP120_GET_FROM_MCU);
+  return s;
+}
 
 int NDPClass::extractData(uint8_t *data, unsigned int *len) {
   int s;
-  unsigned int l = audio_sample_chunk_size;
-  s = syntiant_ndp120_tiny_send_audio_extract(ndp, SYNTIANT_NDP120_EXTRACT_FROM_UNREAD);
+  unsigned int l = 768;
+  // extract audio + annotations
+  s = syntiant_ndp120_tiny_extract_data(ndp, data, &l, 1);
+  // in this simple case, don't return annotations to user
   if (s) {
     *len = 0;
     return s;
   }
-  // extract audio + annotations
-  s = syntiant_ndp120_tiny_extract_data(ndp, data, &l);
-  // in this simple case, don't return annotations to user
-  l -= sizeof(syntiant_ndp120_tiny_dsp_audio_sample_annotation_t);
   *len = l;
   return s;
+}
+
+int NDPClass::waitForAudio(void) {
+  uint32_t notifications;
+
+  for (;;) {
+    int  s = syntiant_ndp120_tiny_poll(ndp, &notifications, 1);
+    check_status("syntiant_ndp_poll", s, 1);
+    if (notifications & SYNTIANT_NDP120_NOTIFICATION_EXTRACT_READY) {
+      return 0;
+    }
+  }
 }
 
 int NDPClass::poll() {
@@ -292,6 +281,41 @@ void NDPClass::interrupt_handler() {
   }
 }
 
+int NDPClass::configureClockandCheckSystem()
+{
+   int s;
+
+    printf("MCU, DSP & NN F/w loaded, so lets restart it before proceeding further.\n");
+    s = syntiant_ndp120_tiny_dsp_restart(ndp);
+    if (s) {
+        printf("polling for DSP_RUNNING failed. s=%d\n",s);
+        return 0;
+    } else {
+        printf("DSP is RUNNING and ready.\n");
+    }
+
+    printf("Change the clock \n");
+    configureClock();
+
+    printf("Update the SPI Speed to %d Hz \n", spi_speed_general);
+    SPI1.endTransaction();
+    SPI1.beginTransaction(SPISettings(spi_speed_general, MSBFIRST, SPI_MODE0));
+
+    delay(100); // This delay to ensure the SPI settings is all fine. We can revisit this and reduce/remove it
+    printf("Clock is also reconfigured so lets restart DSP before proceeding further.\n");
+    s = syntiant_ndp120_tiny_dsp_restart(ndp);
+    if (s) {
+        printf("polling for DSP_RUNNING failed. s=%d\n", s);
+    } else {
+        printf("DSP is RUNNING and ready.\n");
+    }
+
+    getDebugInfo();
+    checkMB();
+
+    return 0;
+}
+
 int NDPClass::load(const char* fw, int bl) {
   fs.mount(&spif);
   static int loaded = 0;
@@ -320,6 +344,8 @@ int NDPClass::load(const char* fw, int bl) {
   // Load package
   String path = "/fs/" + String(fw);
   FILE* package = fopen(path.c_str(), "rb");
+  int nread;
+
   if (package == NULL) {
     s = 1;
     strcpy(tmp, "Error opening: ");
@@ -328,8 +354,13 @@ int NDPClass::load(const char* fw, int bl) {
   }
   memset(file_data, 0, chunk_size);
   file_length = getFileSize(package);
-  while (chunk_size) {
-    fread(file_data, 1, chunk_size, package);
+  while (file_length) {
+    nread = fread(file_data, 1, chunk_size, package);
+    if (!nread) {
+        s = SYNTIANT_NDP120_ERROR_FAIL;
+        check_status("fread() failed", s, 1);
+    }
+
     s = syntiant_ndp120_tiny_load(ndp, file_data, chunk_size);
     if (s != SYNTIANT_NDP120_ERROR_NONE && s != SYNTIANT_NDP120_ERROR_MORE) {
       strcpy(tmp, "Error loading ");
@@ -362,18 +393,8 @@ int NDPClass::load(const char* fw, int bl) {
   spif.deinit();
 
   // after loading FW & DSP, we can configure the clk and increase SPI speed
-  if (loaded == 2) {
-    /* this delay can go away in an upcoming tiny ilib release
-     * and instead be a loop waiting for DSP to start */
-    delay(750);
-    /* poll to process the DSP running indication */
-    poll();
-    configureClock();
-    SPI1.endTransaction();
-    SPI1.beginTransaction(SPISettings(spi_speed_general, MSBFIRST, SPI_MODE0));
-  }
-
   if (loaded == 3) {
+    configureClockandCheckSystem();
     _initialized = true;
   }
   return 1;
@@ -437,6 +458,12 @@ return 1;
 }
 
 int NDPClass::getInfo() {
+
+  printf("\n-------------------------------------------\n");
+  printf("System Info:\n");
+  printf("============\n");
+  printf("    Syntiant iLib Version - %s \n",SYNTIANT_NDP_ILIB_VERSION);
+
   // get the match strings from the loaded model (if any)
   struct syntiant_ndp120_tiny_info info;
   info.fw_version = fwver;
@@ -444,20 +471,22 @@ int NDPClass::getInfo() {
   info.pkg_version = pkgver;
   info.pbi = pbiver;
   info.labels = label_data;
+  info.scale_factor = scale_factor_per_nn;
+  info.sensor_info = sensor_info_per_sensor;
   int s = syntiant_ndp120_tiny_get_info(ndp, &info);
 
   if (s) {
-    printf("%d from syntiant_ndp120_tiny_get_info\n", s);
+    printf("    %d from syntiant_ndp120_tiny_get_info\n", s);
     return 0;
   }
   if (LABELS_STRING_LEN < info.labels_len) {
-    printf("labels strings too long\n");
+    printf("    labels strings too long\n");
     return 0;
   }
 
   int num_labels = 0;
   /* get pointers to the labels */
-  int j = 0;
+  int i, j = 0;
   while ((info.labels_len - j > 3) && (num_labels < SYNTIANT_NDP120_MAX_CLASSES)) {
       labels[num_labels] = &label_data[j];
       num_labels++;
@@ -467,42 +496,47 @@ int NDPClass::getInfo() {
   }
   uint32_t *pbi_version;
   pbi_version = (uint32_t *)&pbiver[0];
-  printf("dsp firmware version: %s\n", dspfwver);
-  printf("package version: %s\n", pkgver);
-  printf("pbi version: ");
-  printf("%lu.",*pbi_version++);
-  printf("%lu.",*pbi_version++);
-  printf("%lu-",*pbi_version++);
-  printf("%lu\n",*pbi_version);
-  printf("num of labels: %d\n", num_labels);
-  printf("labels: ");
-  for (int i = 0; i < num_labels; i++) {
-      printf("%s", labels[i]);
-      if (i < num_labels - 1) {
-          printf(", ");
+  printf("    Dsp firmware version: %s\n", dspfwver);
+  printf("    Package version: %s\n", pkgver);
+  printf("    PBI version: ");
+  printf("%d.",*pbi_version++);
+  printf("%d.",*pbi_version++);
+  printf("%d-",*pbi_version++);
+  printf("%d\n",*pbi_version);
+  printf("    Number of labels: %d\n", num_labels);
+  printf("    Labels: ");
+  for (i = 0; i < num_labels; i++) {
+      printf(" %s, ", labels[i]);
+  }
+  printf("\n");
+  printf("    Total deployed neural networks: %d\n", info.total_nn);
+
+  for (i = 0; i < info.total_nn; i++) {
+      printf("    Scale factor of NN%d: %d\n", i, scale_factor_per_nn[i]);
+  }
+  for (i = 0; i < SYNTIANT_NDP120_SENSOR_MAX; i++) {
+      if (sensor_info_per_sensor[i] != SYNTIANT_NDP120_SENSOR_ID_NONE) {
+          printf("    Sensor id of sensor num%d: %s\n", i,
+              syntiant_ndp_sensor_id_name(sensor_info_per_sensor[i]));
       }
   }
-  printf("\ntotal deployed neural networks: %d\n", info.total_nn);
+
+  printf("\n--------------------xxx--------------------\n");
   return 1;
 }
 
 int NDPClass::configureClock() {
-  struct syntiant_ndp120_tiny_clk_config_data cfg;
-  /* FLL mode: 0p9v_15p360MHz_32p768kHz, index 0 in the FLL table  */
-  struct ndp120_fll_preset_s *fll_preset = &ndp120_fll_presets[0];
-  cfg.src = SYNTIANT_NDP120_MAIN_CLK_SRC_FLL;
-  cfg.core_freq = fll_preset->output_freq;
-  cfg.voltage = fll_preset->operating_voltage;
-  cfg.ref_type = 0; /* clk_pad */
-  cfg.ref_freq = fll_preset->input_freq;
-  int s = syntiant_ndp120_tiny_clock_cfg(ndp, &cfg);
+  int clock_options[2] = {4, 0}; /*PLL mode: mode_0p9v_21p504MHz_32p768kHz (index 2 in pll table), index 0 not crystal */
+  int s = syntiant_ndp120_tiny_clock_cfg(ndp, clock_options);
   check_status("Error in clock config", s, 1);
   return (s == 0);
 }
 
 int NDPClass::configureInferenceThreshold(int threshold_bytes)
-{
-  int s = syntiant_ndp120_tiny_spi_direct_config(ndp, threshold_bytes);
+{ 
+  uint32_t fifo_threshold_value;
+  int s = syntiant_ndp120_tiny_spi_direct_config(ndp, threshold_bytes, &fifo_threshold_value);
+  printf("%s: Request Threshold=%d, Set Threshold=%d \n", threshold_bytes, fifo_threshold_value);
   return s;
 }
 
@@ -525,37 +559,124 @@ int NDPClass::checkMB() {
 }
 
 int NDPClass::getDebugInfo() {
-  int s = 0;
+  int s = 0, i, j;
   struct syntiant_ndp120_tiny_debug cnt;
+  struct syntiant_ndp120_flow_rule *flow;
+  uint8_t sensor_id, sensor_adr, gpio_int, gpio1_int, axes, parameter;
+  struct syntiant_ndp120_sensor_config *sensor_config;
+
   memset(&cnt, 0, sizeof(cnt));
   s = syntiant_ndp120_tiny_get_debug(ndp, &cnt);
   if (s) {
     printf("Error %d from syntiant_ndp120_tiny_get_debug\n", s);
   } else {
-      printf("Debug counters\n");
+      printf("-------------------------------------------\n");
+      printf("Debug Information\n");
+      printf("==================\n");
+
       printf("DSP counters:\n");
-      printf("frame_cnt: 0x%lx\n", cnt.dsp_dbg_cnt.frame_cnt);
-      printf("dnn_int_cnt: 0x%lx\n", cnt.dsp_dbg_cnt.dnn_int_cnt);
-      printf("dnn_err_cnt: 0x%lx\n", cnt.dsp_dbg_cnt.dnn_err_cnt);
-      printf("h2d_mb_cnt: 0x%lx\n", cnt.dsp_dbg_cnt.h2d_mb_cnt);
-      printf("d2m_mb_cnt: 0x%lx\n", cnt.dsp_dbg_cnt.d2m_mb_cnt);
-      printf("m2d_mb_cnt: 0x%lx\n", cnt.dsp_dbg_cnt.m2d_mb_cnt);
-      printf("watermark_cnt: 0x%lx\n", cnt.dsp_dbg_cnt.watermark_cnt);
-      printf("fifo_overflow_cnt: 0x%lx\n", cnt.dsp_dbg_cnt.fifo_overflow_cnt);
+      printf("   frame_cnt: 0x%lx\n", cnt.dsp_dbg_cnt.frame_cnt);
+      printf("   dnn_int_cnt: 0x%lx\n", cnt.dsp_dbg_cnt.dnn_int_cnt);
+      printf("   dnn_err_cnt: 0x%lx\n", cnt.dsp_dbg_cnt.dnn_err_cnt);
+      printf("   h2d_mb_cnt: 0x%lx\n", cnt.dsp_dbg_cnt.h2d_mb_cnt);
+      printf("   d2m_mb_cnt: 0x%lx\n", cnt.dsp_dbg_cnt.d2m_mb_cnt);
+      printf("   m2d_mb_cnt: 0x%lx\n", cnt.dsp_dbg_cnt.m2d_mb_cnt);
+      printf("   watermark_cnt: 0x%lx\n", cnt.dsp_dbg_cnt.watermark_cnt);
+      printf("   fifo_overflow_cnt: 0x%lx\n", cnt.dsp_dbg_cnt.fifo_overflow_cnt);
+
       printf("MCU counters:\n");
-      printf("signature: 0x%lx\n", cnt.mcu_dbg_cnt.signature);
-      printf("frame_cnt: 0x%lx\n", cnt.mcu_dbg_cnt.frame_cnt);
-      printf("dsp2mcu_intr_cnt: 0x%lx\n", cnt.mcu_dbg_cnt.dsp2mcu_intr_cnt);
-      printf("dsp2mcu_nn_done_cnt: 0x%lx\n", cnt.mcu_dbg_cnt.dsp2mcu_nn_done_cnt);
-      printf("mcu2host_match_cnt: 0x%lx\n", cnt.mcu_dbg_cnt.mcu2host_match_cnt);
-      printf("mcu2host_mpf_cnt: 0x%lx\n", cnt.mcu_dbg_cnt.mcu2host_mpf_cnt);
-      printf("matches: 0x%lx\n", cnt.mcu_dbg_cnt.matches);
-      printf("dsp2mcu_queue_cnt: 0x%lx\n", cnt.mcu_dbg_cnt.dsp2mcu_queue_cnt);
-      printf("mbin_int_cnt: 0x%lx\n", cnt.mcu_dbg_cnt.mbin_int_cnt);
-      printf("mbout_int_cnt: 0x%lx\n", cnt.mcu_dbg_cnt.mbout_int_cnt);
-      printf("nn_orch_flwchg_cnt: 0x%lx\n", cnt.mcu_dbg_cnt.nn_orch_flwchg_cnt);
-      printf("unknown_activation_cnt: 0x%lx\n",  cnt.mcu_dbg_cnt.unknown_activation_cnt);
-      printf("unknown_int_count: 0x%lx\n", cnt.mcu_dbg_cnt.unknown_int_count);
+      printf("   signature: 0x%lx\n", cnt.mcu_dbg_cnt.signature);
+      printf("   frame_cnt: 0x%lx\n", cnt.mcu_dbg_cnt.frame_cnt);
+      printf("   dsp2mcu_intr_cnt: 0x%lx\n", cnt.mcu_dbg_cnt.dsp2mcu_intr_cnt);
+      printf("   dsp2mcu_nn_done_cnt: 0x%lx\n", cnt.mcu_dbg_cnt.dsp2mcu_nn_done_cnt);
+      printf("   mcu2host_match_cnt: 0x%lx\n", cnt.mcu_dbg_cnt.mcu2host_match_cnt);
+      printf("   mcu2host_mpf_cnt: 0x%lx\n", cnt.mcu_dbg_cnt.mcu2host_mpf_cnt);
+      printf("   matches: 0x%lx\n", cnt.mcu_dbg_cnt.matches);
+      printf("   dsp2mcu_queue_cnt: 0x%lx\n", cnt.mcu_dbg_cnt.dsp2mcu_queue_cnt);
+      printf("   mbin_int_cnt: 0x%lx\n", cnt.mcu_dbg_cnt.mbin_int_cnt);
+      printf("   mbout_int_cnt: 0x%lx\n", cnt.mcu_dbg_cnt.mbout_int_cnt);
+      printf("   nn_orch_flwchg_cnt: 0x%lx\n", cnt.mcu_dbg_cnt.nn_orch_flwchg_cnt);
+      printf("   unknown_activation_cnt: 0x%lx\n",  cnt.mcu_dbg_cnt.unknown_activation_cnt);
+      printf("   unknown_int_count: 0x%lx\n", cnt.mcu_dbg_cnt.unknown_int_count);
+
+      printf("Others\n");
+      printf("   dbg1: 0x%x\n", cnt.mcu_dbg_cnt.dbg1);
+      printf("   dbg2: 0x%x\n", cnt.mcu_dbg_cnt.dbg2);
+      printf("   accumulator_error: %d\n", cnt.mcu_dbg_cnt.accumulator_error);
+
+      printf("DSP flow rules:\n");
+      for (i = 0; i < NDP120_PCM_DATA_FLOW_RULE_MAX; i++) {
+          flow = &cnt.flow_rules.src_pcm_audio[i];
+          if (flow->dst_type != NDP120_DSP_DATA_FLOW_DST_TYPE_NONE) {
+              printf("   pcm%d: %s%d {%d}\n", flow->src_param,
+                  NDP120_DSP_DATA_FLOW_RULE_DST_STR(*flow),
+                  flow->dst_param, flow->algo_config_index);
+          }
+      }
+      for (i = 0; i < NDP120_FUNC_DATA_FLOW_RULE_MAX; i++) {
+          flow = &cnt.flow_rules.src_function[i];
+          if (flow->dst_type != NDP120_DSP_DATA_FLOW_DST_TYPE_NONE) {
+              printf("   func%d: %s%d {%d}\n", flow->src_param,
+                  NDP120_DSP_DATA_FLOW_RULE_DST_STR(*flow),
+                  flow->dst_param, flow->algo_config_index);
+          }
+      }
+      for (i = 0; i < NDP120_NN_DATA_FLOW_RULE_MAX; i++) {
+          flow = &cnt.flow_rules.src_nn[i];
+          if (flow->dst_type != NDP120_DSP_DATA_FLOW_DST_TYPE_NONE) {
+              printf("   nn%d: %s%d\n", flow->src_param,
+                  NDP120_DSP_DATA_FLOW_RULE_DST_STR(*flow),
+                  flow->dst_param);
+          }
+      }
+
+      printf("Misc:\n");
+      printf("   last_network_id: %d\n", cnt.dsp_dev.last_network);
+      printf("   decibel: %d\n", cnt.dsp_dev.db_measured);
+      printf("   sample tank memory type: %s\n",
+          cnt.dsp_dev.sampletank_mem_type ==
+              SYNTIANT_NDP120_DSP_MEM_TYPE_HEAP ? "DSP" :
+          cnt.dsp_dev.sampletank_mem_type ==
+              SYNTIANT_NDP120_DSP_MEM_TYPE_DNN_DATA ? "DNN" : "None");
+      printf("   device_state: 0x%x\n", cnt.dsp_dev.device_state);
+
+      printf("Sensor config:\n");
+      for (i = 0; i < SYNTIANT_NDP120_SENSOR_MAX; i++) {
+          sensor_config = &cnt.sensor_config[i];
+          sensor_id = (sensor_config->control &
+                        SYNTIANT_NDP120_SENSOR_CONTROL_ID_MASK) >>
+                        SYNTIANT_NDP120_SENSOR_CONTROL_ID_SHIFT;
+          if (!sensor_id) continue;
+
+          sensor_adr = (sensor_config->control &
+                        SYNTIANT_NDP120_SENSOR_CONTROL_ADDRESS_MASK) >>
+                        SYNTIANT_NDP120_SENSOR_CONTROL_ADDRESS_SHIFT;
+          gpio_int = (sensor_config->control &
+                      SYNTIANT_NDP120_SENSOR_CONTROL_INT_GPIO_MASK) >>
+                      SYNTIANT_NDP120_SENSOR_CONTROL_INT_GPIO_SHIFT;
+          gpio1_int = (sensor_config->control &
+                        SYNTIANT_NDP120_SENSOR_CONTROL_INT_GPIO1_MASK) >>
+                        SYNTIANT_NDP120_SENSOR_CONTROL_INT_GPIO1_SHIFT;
+          axes = (sensor_config->control &
+                  SYNTIANT_NDP120_SENSOR_CONTROL_AXES_MASK) >>
+                  SYNTIANT_NDP120_SENSOR_CONTROL_AXES_SHIFT;
+          printf("   sensor num %d: ", i);
+          printf("type=%d, ", sensor_id);
+          printf("addr=0x%x, ", sensor_adr & 0x7f);
+          printf("gpio int=%d, ", gpio_int -1);
+          if (gpio1_int) {
+              printf("gpio1 int=%d, ", gpio1_int -1);
+          }
+          printf("axes=%d, ", axes);
+          printf("enable=0x%x, ", sensor_config->enable);
+          for (j = 0; j < SYNTIANT_NDP120_SENSOR_PARAM_MAX; j++) {
+              parameter = sensor_config->parameter[j];
+              printf("param[%d]=0x%x, ", j, parameter);
+          }
+          printf("   interrupt count=%d\n", cnt.sensor_state[i].int_count);
+          printf("\n");
+      }
+    printf("-------------------xxx---------------------\n");
   }
   return !s;
 }
