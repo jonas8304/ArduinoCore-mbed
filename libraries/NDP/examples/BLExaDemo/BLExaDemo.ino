@@ -14,6 +14,8 @@ void alertViaBLE(int index) {
 
   alertLevel.writeValue(2);
   ledGreenOn();
+  delay(1000);
+  alertLevel.writeValue(0);
 }
 
 void ledGreenOn() {
@@ -58,9 +60,9 @@ void setup() {
   NDP.onError(ledRedBlink);
   NDP.onMatch(alertViaBLE);
   NDP.onEvent(ledGreenOn);
-  NDP.begin("mcu_fw_120.synpkg");
-  NDP.load("dsp_firmware.synpkg");
-  NDP.load("alexa_model334_ndp120.synpkg");
+  NDP.begin("mcu_fw_120_v105.synpkg");
+  NDP.load("dsp_firmware_v105.synpkg");
+  NDP.load("alexa_model334_ndp120_v105.synpkg");
   NDP.turnOnMicrophone();
   NDP.interrupts();
 

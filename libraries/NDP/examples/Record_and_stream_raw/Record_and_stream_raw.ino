@@ -1,10 +1,6 @@
 /*
   Stream the microphone audio to serial port
   The file is RAW
-  Prerequisite libraries:
-    https://github.com/pschatzmann/arduino-libg722
-    https://github.com/pschatzmann/arduino-audio-tools/
-    v0.9.3(older version) is required
 
   Precedure to extract audio: 
   NOTE: The baud rate is different from the codec example, due to the raw data 
@@ -54,9 +50,9 @@ void setup() {
   NDP.onEvent(ledGreenOn);
 
   Serial.println("Loading synpackages");
-  NDP.begin("mcu_fw_120.synpkg");
-  NDP.load("dsp_firmware.synpkg");
-  NDP.load("alexa_model334_ndp120.synpkg");
+  NDP.begin("mcu_fw_120_v105.synpkg");
+  NDP.load("dsp_firmware_v105.synpkg");
+  NDP.load("alexa_model334_ndp120_v105.synpkg");
   Serial.println("packages loaded");
   NDP.turnOnMicrophone();
   NDP.extractStart();

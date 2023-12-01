@@ -214,7 +214,6 @@ int NDPClass::sendData(uint8_t *data, unsigned int len)
 }
 
 int NDPClass::extractStart(void) {
-  uint32_t sample_size;
   int s = syntiant_ndp120_tiny_get_recording_metadata(ndp,
       &sample_size, SYNTIANT_NDP120_GET_FROM_MCU);
   return s;
@@ -222,15 +221,15 @@ int NDPClass::extractStart(void) {
 
 int NDPClass::extractData(uint8_t *data, unsigned int *len) {
   int s;
-  unsigned int l = 768;
+  unsigned int s_size = (unsigned int)sample_size;
   // extract audio + annotations
-  s = syntiant_ndp120_tiny_extract_data(ndp, data, &l, 1);
+  s = syntiant_ndp120_tiny_extract_data(ndp, data, &s_size, 1);
   // in this simple case, don't return annotations to user
   if (s) {
     *len = 0;
     return s;
   }
-  *len = l;
+  *len = s_size;
   return s;
 }
 
@@ -302,14 +301,6 @@ int NDPClass::configureClockandCheckSystem()
     SPI1.beginTransaction(SPISettings(spi_speed_general, MSBFIRST, SPI_MODE0));
 
     delay(100); // This delay to ensure the SPI settings is all fine. We can revisit this and reduce/remove it
-    printf("Clock is also reconfigured so lets restart DSP before proceeding further.\n");
-    s = syntiant_ndp120_tiny_dsp_restart(ndp);
-    if (s) {
-        printf("polling for DSP_RUNNING failed. s=%d\n", s);
-    } else {
-        printf("DSP is RUNNING and ready.\n");
-    }
-
     getDebugInfo();
     checkMB();
 

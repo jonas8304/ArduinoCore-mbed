@@ -120,8 +120,6 @@ public:
    static int mbwait(void *d);
    static int get_type(void *d, unsigned int *type);
 
-   int getAudioChunkSize(void);
-
 public:
    static const PinName NDP_CS = p31;
    static const PinName FLASH_CS = p26;
@@ -166,7 +164,8 @@ private:
    char label_data[LABELS_STRING_LEN] = "";
    char *labels[MAX_LABELS];
 
-   unsigned int audio_sample_chunk_size = 0;
+   uint32_t sample_size = 768;
+
 };
 
 extern NDPClass NDP;

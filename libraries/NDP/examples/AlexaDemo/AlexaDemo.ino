@@ -44,9 +44,9 @@ void setup() {
   NDP.onMatch(ledBlueOn);
   NDP.onEvent(ledGreenOn);
   Serial.println("Loading synpackages");
-  NDP.begin("mcu_fw_120.synpkg");
-  NDP.load("dsp_firmware.synpkg");
-  NDP.load("alexa_model334_ndp120.synpkg");
+  NDP.begin("mcu_fw_120_v105.synpkg");
+  NDP.load("dsp_firmware_v105.synpkg");
+  NDP.load("alexa_model334_ndp120_v105.synpkg");
   Serial.println("packages loaded");
   NDP.getInfo();
   Serial.println("Configure mic");

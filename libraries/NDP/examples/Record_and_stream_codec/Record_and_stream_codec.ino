@@ -28,7 +28,6 @@
 G722Encoder encoder;
 
 uint8_t data[2048];
-int n;
 
 void ledGreenOn() {
   nicla::leds.begin();
@@ -57,9 +56,9 @@ void setup() {
   encoder.setOutputStream(Serial);
 
   Serial.println("Loading synpackages");
-  NDP.begin("mcu_fw_120.synpkg");
-  NDP.load("dsp_firmware.synpkg");
-  NDP.load("alexa_model334_ndp120.synpkg");
+  NDP.begin("mcu_fw_120_v105.synpkg");
+  NDP.load("dsp_firmware_v105.synpkg");
+  NDP.load("alexa_model334_ndp120_v105.synpkg");
   Serial.println("packages loaded");
   NDP.turnOnMicrophone();
   NDP.extractStart();
